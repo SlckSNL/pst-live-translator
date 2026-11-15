@@ -9,8 +9,8 @@ android {
         applicationId = "com.pst.livetranslator"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 3
+        versionName = "3.0.0"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -20,4 +20,5 @@ android {
 }
 dependencies {
     implementation("com.google.mlkit:translate:17.0.3")
+    implementation("com.alphacephei:vosk-android:0.3.47")
 }
