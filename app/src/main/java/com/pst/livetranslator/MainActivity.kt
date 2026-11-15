@@ -39,6 +39,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var voiceEnabled: CheckBox
     private lateinit var translator: Translator
     private var recognizer: SpeechRecognizer? = null
+    private lateinit var offline: OfflineStreaming
+    private lateinit var offlineModeButton: Button
+    private var offlineMode = false
     private var tts: TextToSpeech? = null
     private var modelReady = false
     private var ttsReady = false
@@ -81,6 +84,29 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             setOnClickListener { if (running) stopSession() else startSession() }
         }
         root.addView(toggle)
+        offlineModeButton = Button(this).apply {
+            text = "MOD: ANDROID KONUŞMA TANIMA"
+            setOnClickListener {
+                if (!running) {
+                    offlineMode = !offlineMode
+                    text = if (offlineMode) "MOD: SÜREKLİ ÇEVRİMDIŞI PCM" else "MOD: ANDROID KONUŞMA TANIMA"
+                    updateReady()
+                }
+            }
+        }
+        root.addView(offlineModeButton)
+        root.addView(Button(this).apply {
+            text = "VOSK İNGİLİZCE MODELİNİ İNDİR"
+            setOnClickListener {
+                isEnabled = false
+                status.text = "İngilizce model indiriliyor..."
+                offline.install { ok ->
+                    isEnabled = true
+                    text = if (ok) "VOSK MODELİ HAZIR" else "MODEL İNDİRMEYİ TEKRAR DENE"
+                    updateReady()
+                }
+            }
+        })
         voiceEnabled = CheckBox(this).apply {
             text = "Türkçe seslendirme (Bluetooth)"
             isChecked = true
@@ -117,6 +143,16 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         })
         root.addView(label("Tek telefon mikrofonu, üst üste konuşan kişileri ayrı ses kanallarına ayıramaz. Konuşmacıların sırayla konuşması doğruluğu artırır.", 12f))
         setContentView(ScrollView(this).apply { addView(root) })
+        offline = OfflineStreaming(this, object : OfflineStreaming.Listener {
+            override fun onStatus(value: String) { if (running && offlineMode) status.text = value }
+            override fun onPartial(value: String) {
+                if (running && offlineMode) { english.text = value; partialText = value }
+            }
+            override fun onFinal(value: String) {
+                if (running && offlineMode) submit(value, generation)
+            }
+            override fun onError(value: String) { status.text = value }
+        })
 
         translator = Translation.getClient(
             TranslatorOptions.Builder()
@@ -160,11 +196,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private fun updateReady() {
         if (running || !::toggle.isInitialized) return
         val speechReady = SpeechRecognizer.isRecognitionAvailable(this)
-        toggle.isEnabled = modelReady && speechReady
+        toggle.isEnabled = modelReady && (if (offlineMode) offline.installed() else speechReady)
         toggle.text = "ÇEVİRİYİ BAŞLAT"
         status.text = when {
             !modelReady -> "Türkçe çeviri modeli hazırlanıyor..."
-            !speechReady -> "Android konuşma tanıma servisi bulunamadı."
+            offlineMode && !offline.installed() -> "Önce Vosk İngilizce modelini indirin."
+            !offlineMode && !speechReady -> "Android konuşma tanıma servisi bulunamadı."
             !ttsReady -> "Metin çevirisi hazır; Türkçe seslendirme kullanılamayabilir."
             else -> "Hazır • İngilizce dinleme / Türkçe çeviri"
         }
@@ -186,7 +223,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         transcript.clear()
         toggle.text = "DURDUR"
         turkish.text = "Dinleniyor..."
-        restart(0)
+        if (offlineMode) offline.start() else restart(0)
     }
 
     private fun restart(delay: Long) {
@@ -341,6 +378,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         listening = false
         pendingRestart?.let { handler.removeCallbacks(it) }
         partialFallback?.let { handler.removeCallbacks(it) }
+        offline.stop()
         recognizer?.cancel()
         recognizer?.destroy()
         recognizer = null
