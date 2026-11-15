@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: pst-live-translator-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r server/requirements.txt
+    startCommand: uvicorn server.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PST_GATEWAY_TOKEN
+        sync: false
+      - key: PST_TRANSLATION_MODEL
+        value: gpt-4.1-mini
