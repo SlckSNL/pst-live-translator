@@ -15,6 +15,8 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.CheckBox
+import java.util.ArrayDeque
 import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.Translator
@@ -38,6 +40,13 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var busy = false
     private var epoch = 0
     private var pending: Runnable? = null
+    private lateinit var history: TextView
+    private lateinit var voiceEnabled: CheckBox
+    private val transcript = mutableListOf<String>()
+    private val voiceQueue = ArrayDeque<String>()
+    private var lastText = ""
+    private var lastAt = 0L
+    private var voiceBusy = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,12 +68,17 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             setOnClickListener { if (running) stopTranslation() else startTranslation() }
         }
         layout.addView(toggle)
+        voiceEnabled = CheckBox(this).apply { text = "Türkçe seslendirme"; isChecked = true }
+        layout.addView(voiceEnabled)
+        layout.addView(Button(this).apply { text = "TOPLANTI DÖKÜMÜNÜ PAYLAŞ"; setOnClickListener { val send = Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, transcript.joinToString("\\n")) }; startActivity(Intent.createChooser(send, "Dökümü paylaş")) } })
         layout.addView(label("İngilizce konuşma", 18f))
         original = label("Henüz konuşma yok", 17f)
         layout.addView(original)
         layout.addView(label("Türkçe çeviri", 18f))
         translated = label("Çeviri burada görünecek", 19f)
         layout.addView(translated)
+        history = label("TOPLANTI DÖKÜMÜ", 15f)
+        layout.addView(history)
         layout.addView(label("Telefon mikrofonu İngilizce konuşmaları dinler. Türkçe seslendirme bağlı Bluetooth medya çıkışına yönlendirilir. İlk çeviri modeli indirme işlemi internet gerektirir.", 13f))
         setContentView(ScrollView(this).apply { addView(layout) })
         translator = Translation.getClient(TranslatorOptions.Builder()
@@ -82,7 +96,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         if (code == TextToSpeech.SUCCESS) {
             val result = tts?.setLanguage(Locale.forLanguageTag("tr-TR")) ?: TextToSpeech.LANG_NOT_SUPPORTED
             ttsReady = result != TextToSpeech.LANG_NOT_SUPPORTED && result != TextToSpeech.LANG_MISSING_DATA
-            tts?.setSpeechRate(1.12f)
+            tts?.setSpeechRate(1.22f)
+            tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() { override fun onStart(id: String?) {} ; override fun onDone(id: String?) { handler.post { voiceBusy = false; playNext() } }; override fun onError(id: String?) { handler.post { voiceBusy = false; playNext() } } })
         }
         refresh()
     }
@@ -106,6 +121,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             return
         }
         running = true
+        transcript.clear()
+        voiceQueue.clear()
+        lastText = ""
         epoch++
         toggle.text = "DURDUR"
         schedule(0)
@@ -144,7 +162,13 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 listening = false
                 val words = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
                 if (words.isNullOrBlank()) { schedule(400); return }
+                val now = System.currentTimeMillis()
+                if (words.equals(lastText, true) && now - lastAt < 10000) { schedule(200); return }
+                lastText = words
+                lastAt = now
                 original.text = words
+                transcript.add("EN: " + words)
+                renderHistory()
                 busy = true
                 status.text = "Çevriliyor..."
                 val token = epoch
@@ -152,10 +176,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     if (running && token == epoch) {
                         translated.text = value
                         status.text = "Türkçe seslendiriliyor..."
-                        tts?.speak(value, TextToSpeech.QUEUE_ADD, null, "pst-$token-${System.nanoTime()}")
+                        transcript.add("TR: " + value)
+                        renderHistory()
+                        if (voiceEnabled.isChecked) { voiceQueue.addLast(value); playNext() }
                     }
                     busy = false
-                    schedule(600)
+                    schedule(150)
                 }.addOnFailureListener {
                     if (running && token == epoch) status.text = "Çeviri hatası: ${it.localizedMessage}"
                     busy = false
@@ -179,6 +205,10 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
     }
 
+    private fun renderHistory() { history.text = transcript.takeLast(40).joinToString("\n") }
+
+    private fun playNext() { if (voiceBusy || voiceQueue.isEmpty() || !running) return; voiceBusy = true; tts?.speak(voiceQueue.removeFirst(), TextToSpeech.QUEUE_FLUSH, null, "pst-" + System.nanoTime()) }
+
     private fun stopTranslation() {
         running = false
         epoch++
@@ -189,6 +219,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         speech?.destroy()
         speech = null
         tts?.stop()
+        voiceBusy = false
+        voiceQueue.clear()
         refresh()
     }
 
