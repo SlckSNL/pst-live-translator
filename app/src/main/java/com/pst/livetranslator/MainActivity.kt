@@ -42,6 +42,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var offline: OfflineStreaming
     private lateinit var offlineModeButton: Button
     private var offlineMode = false
+    private var partialJob: Runnable? = null
     private var tts: TextToSpeech? = null
     private var modelReady = false
     private var ttsReady = false
@@ -108,8 +109,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             }
         })
         voiceEnabled = CheckBox(this).apply {
-            text = "Türkçe seslendirme (Bluetooth)"
-            isChecked = true
+            text = "Türkçe seslendirme (isteğe bağlı)"
+            isChecked = false
         }
         root.addView(voiceEnabled)
         root.addView(label("TÜRKÇE CANLI ÇEVİRİ", 18f))
@@ -146,10 +147,23 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         offline = OfflineStreaming(this, object : OfflineStreaming.Listener {
             override fun onStatus(value: String) { if (running && offlineMode) status.text = value }
             override fun onPartial(value: String) {
-                if (running && offlineMode) { english.text = value; partialText = value }
+                if (running && offlineMode) {
+                    english.text = value
+                    partialText = value
+                    partialJob?.let { handler.removeCallbacks(it) }
+                    val candidate = value
+                    val token = generation
+                    if (candidate.length >= 24) {
+                        val job = Runnable {
+                            if (running && token == generation && partialText == candidate) submit(candidate, token)
+                        }
+                        partialJob = job
+                        handler.postDelayed(job, 900)
+                    }
+                }
             }
             override fun onFinal(value: String) {
-                if (running && offlineMode) submit(value, generation)
+                if (running && offlineMode) { partialJob?.let { handler.removeCallbacks(it) }; submit(value, generation) }
             }
             override fun onError(value: String) { status.text = value }
         })
@@ -169,6 +183,10 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 status.text = "Çeviri modeli hatası: ${it.localizedMessage}"
                 turkish.text = "Çeviri modeli yüklenemedi. İnterneti kontrol edin."
             }
+        if (offline.installed()) {
+            offlineMode = true
+            offlineModeButton.text = "MOD: SÜREKLİ ÇEVRİMDIŞI PCM"
+        }
         tts = TextToSpeech(this, this)
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 101)
@@ -321,6 +339,14 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         if (clean.length < 3) return
         val now = System.currentTimeMillis()
         if (clean.equals(lastSubmitted, ignoreCase = true) && now - lastSubmittedAt < 9000L) return
+        if (lastSubmitted.isNotEmpty() && clean.startsWith(lastSubmitted, ignoreCase = true) && now - lastSubmittedAt < 6000L) {
+            val remainder = clean.substring(lastSubmitted.length).trim()
+            if (remainder.length < 5) return
+            lastSubmitted = clean
+            translations.addLast(remainder)
+            translateNext(token)
+            return
+        }
         lastSubmitted = clean
         lastSubmittedAt = now
         english.text = clean
@@ -379,6 +405,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         pendingRestart?.let { handler.removeCallbacks(it) }
         partialFallback?.let { handler.removeCallbacks(it) }
         offline.stop()
+        partialJob?.let { handler.removeCallbacks(it) }
         recognizer?.cancel()
         recognizer?.destroy()
         recognizer = null
