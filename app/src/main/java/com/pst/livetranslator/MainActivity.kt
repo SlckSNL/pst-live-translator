@@ -11,202 +11,253 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import android.view.View
+import android.view.WindowManager
+import android.graphics.Typeface
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.CheckBox
-import java.util.ArrayDeque
-import android.view.WindowManager
-import android.graphics.Typeface
+import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.nl.translate.TranslatorOptions
-import com.google.mlkit.common.model.DownloadConditions
+import java.util.ArrayDeque
 import java.util.Locale
 
 class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var status: TextView
-    private lateinit var original: TextView
-    private lateinit var translated: TextView
+    private lateinit var english: TextView
+    private lateinit var turkish: TextView
+    private lateinit var signal: TextView
     private lateinit var toggle: Button
+    private lateinit var history: TextView
+    private lateinit var voiceEnabled: CheckBox
     private lateinit var translator: Translator
-    private var speech: SpeechRecognizer? = null
+    private var recognizer: SpeechRecognizer? = null
     private var tts: TextToSpeech? = null
     private var modelReady = false
     private var ttsReady = false
     private var running = false
     private var listening = false
-    private var busy = false
-    private var epoch = 0
-    private var pending: Runnable? = null
-    private lateinit var history: TextView
-    private lateinit var voiceEnabled: CheckBox
-    private val transcript = mutableListOf<String>()
+    private var speaking = false
+    private var generation = 0
+    private var retries = 0
+    private var pendingRestart: Runnable? = null
+    private var partialFallback: Runnable? = null
+    private var partialText = ""
+    private var lastSubmitted = ""
+    private var lastSubmittedAt = 0L
+    private var lastTranslated = ""
+    private var translating = false
+    private val translations = ArrayDeque<String>()
     private val voiceQueue = ArrayDeque<String>()
-    private var lastText = ""
-    private var lastAt = 0L
-    private var voiceBusy = false
-    private var translationPending = 0
-    private var lastRms = -100f
-    private lateinit var signal: TextView
-    private lateinit var historyToggle: Button
-    private var showHistory = false
+    private val transcript = mutableListOf<String>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        val layout = LinearLayout(this).apply {
+        val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(28, 35, 28, 28)
+            setPadding(28, 28, 28, 32)
         }
-        fun label(value: String, size: Float): TextView = TextView(this).apply {
+        fun label(value: String, size: Float) = TextView(this).apply {
             text = value
             textSize = size
-            setPadding(0, 14, 0, 14)
+            setPadding(0, 10, 0, 10)
         }
-        layout.addView(label("PST LIVE • TOPLANTI MODU", 22f))
-        layout.addView(label("Altı konuşmacı • Telefon mikrofonu • EN → TR", 14f))
-        status = label("Hazırlanıyor...", 15f)
-        layout.addView(status)
-        signal = label("Mikrofon seviyesi: bekleniyor", 13f)
-        layout.addView(signal)
+        root.addView(label("PST LIVE • MEETING", 22f))
+        status = label("Başlatılıyor...", 15f)
+        root.addView(status)
+        signal = label("Mikrofon: bekleniyor", 13f)
+        root.addView(signal)
         toggle = Button(this).apply {
             text = "HAZIRLANIYOR"
             isEnabled = false
-            setOnClickListener { if (running) stopTranslation() else startTranslation() }
+            setOnClickListener { if (running) stopSession() else startSession() }
         }
-        layout.addView(toggle)
-        voiceEnabled = CheckBox(this).apply { text = "Türkçe seslendirme"; isChecked = true }
-        layout.addView(voiceEnabled)
-        
-        layout.addView(label("İngilizce konuşma", 18f))
-        original = label("Henüz konuşma yok", 15f)
-        layout.addView(original)
-        layout.addView(label("Türkçe çeviri", 18f))
-        translated = label("Çeviri burada görünecek", 38f)
-        translated.setTypeface(null, Typeface.BOLD)
-        translated.setLineSpacing(10f, 1.12f)
-        translated.setPadding(8, 24, 8, 36)
-        translated.setTextIsSelectable(true)
-        layout.addView(translated)
-        historyToggle = Button(this).apply { text = "DÖKÜMÜ GÖSTER (İKİNCİL)"; setOnClickListener { showHistory = !showHistory; history.visibility = if (showHistory) android.view.View.VISIBLE else android.view.View.GONE; text = if (showHistory) "DÖKÜMÜ GİZLE" else "DÖKÜMÜ GÖSTER (İKİNCİL)" } }
-        layout.addView(historyToggle)
-        history = label("", 13f)
-        history.visibility = android.view.View.GONE
-        layout.addView(history)
-        layout.addView(Button(this).apply { text = "DÖKÜMÜ PAYLAŞ"; setOnClickListener { val send = Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, transcript.joinToString("\\n")) }; startActivity(Intent.createChooser(send, "Dökümü paylaş")) } })
-        layout.addView(label("Telefon mikrofonu İngilizce konuşmaları dinler. Türkçe seslendirme bağlı Bluetooth medya çıkışına yönlendirilir. İlk çeviri modeli indirme işlemi internet gerektirir.", 13f))
-        setContentView(ScrollView(this).apply { addView(layout) })
-        translator = Translation.getClient(TranslatorOptions.Builder()
-            .setSourceLanguage(TranslateLanguage.ENGLISH)
-            .setTargetLanguage(TranslateLanguage.TURKISH).build())
+        root.addView(toggle)
+        voiceEnabled = CheckBox(this).apply {
+            text = "Türkçe seslendirme (Bluetooth)"
+            isChecked = true
+        }
+        root.addView(voiceEnabled)
+        root.addView(label("TÜRKÇE CANLI ÇEVİRİ", 18f))
+        turkish = label("Konuşma bekleniyor...", 38f).apply {
+            setTypeface(null, Typeface.BOLD)
+            setLineSpacing(10f, 1.15f)
+            setTextIsSelectable(true)
+            minHeight = 250
+        }
+        root.addView(turkish)
+        root.addView(label("Algılanan İngilizce", 14f))
+        english = label("—", 15f)
+        root.addView(english)
+        val historyToggle = Button(this).apply { text = "TRANSKRİPTİ GÖSTER" }
+        root.addView(historyToggle)
+        history = label("", 13f).apply { visibility = View.GONE }
+        root.addView(history)
+        historyToggle.setOnClickListener {
+            history.visibility = if (history.visibility == View.GONE) View.VISIBLE else View.GONE
+            historyToggle.text = if (history.visibility == View.GONE) "TRANSKRİPTİ GÖSTER" else "TRANSKRİPTİ GİZLE"
+        }
+        root.addView(Button(this).apply {
+            text = "DÖKÜMÜ PAYLAŞ"
+            setOnClickListener {
+                val share = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, transcript.joinToString("\n"))
+                }
+                startActivity(Intent.createChooser(share, "Dökümü paylaş"))
+            }
+        })
+        root.addView(label("Tek telefon mikrofonu, üst üste konuşan kişileri ayrı ses kanallarına ayıramaz. Konuşmacıların sırayla konuşması doğruluğu artırır.", 12f))
+        setContentView(ScrollView(this).apply { addView(root) })
+
+        translator = Translation.getClient(
+            TranslatorOptions.Builder()
+                .setSourceLanguage(TranslateLanguage.ENGLISH)
+                .setTargetLanguage(TranslateLanguage.TURKISH)
+                .build()
+        )
         translator.downloadModelIfNeeded(DownloadConditions.Builder().build())
-            .addOnSuccessListener { modelReady = true; refresh() }
-            .addOnFailureListener { status.text = "Model indirilemedi: ${it.localizedMessage}" }
+            .addOnSuccessListener {
+                modelReady = true
+                updateReady()
+            }
+            .addOnFailureListener {
+                status.text = "Çeviri modeli hatası: ${it.localizedMessage}"
+                turkish.text = "Çeviri modeli yüklenemedi. İnterneti kontrol edin."
+            }
         tts = TextToSpeech(this, this)
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 101)
+        }
     }
 
-    override fun onInit(code: Int) {
-        if (code == TextToSpeech.SUCCESS) {
-            val result = tts?.setLanguage(Locale.forLanguageTag("tr-TR")) ?: TextToSpeech.LANG_NOT_SUPPORTED
-            ttsReady = result != TextToSpeech.LANG_NOT_SUPPORTED && result != TextToSpeech.LANG_MISSING_DATA
-            tts?.setSpeechRate(1.22f)
-            tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() { override fun onStart(id: String?) {} ; override fun onDone(id: String?) { handler.post { voiceBusy = false; playNext() } }; override fun onError(id: String?) { handler.post { voiceBusy = false; playNext() } } })
+    override fun onInit(result: Int) {
+        if (result == TextToSpeech.SUCCESS) {
+            val code = tts?.setLanguage(Locale.forLanguageTag("tr-TR"))
+            ttsReady = code != TextToSpeech.LANG_MISSING_DATA && code != TextToSpeech.LANG_NOT_SUPPORTED
+            tts?.setSpeechRate(1.18f)
+            tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {}
+                override fun onDone(utteranceId: String?) {
+                    handler.post { speaking = false; speakNext() }
+                }
+                override fun onError(utteranceId: String?) {
+                    handler.post { speaking = false; speakNext() }
+                }
+            })
         }
-        refresh()
+        updateReady()
     }
 
-    private fun refresh() {
-        if (running) return
-        val available = SpeechRecognizer.isRecognitionAvailable(this)
-        status.text = when {
-            !modelReady -> "Çeviri modeli indiriliyor..."
-            !ttsReady -> "Türkçe TTS sesi eksik; telefon ayarlarından yükleyin."
-            !available -> "Konuşma tanıma servisi bulunamadı."
-            else -> "Hazır. Kulaklığı bağlayıp başlatın."
-        }
-        toggle.isEnabled = modelReady && ttsReady && available
+    private fun updateReady() {
+        if (running || !::toggle.isInitialized) return
+        val speechReady = SpeechRecognizer.isRecognitionAvailable(this)
+        toggle.isEnabled = modelReady && speechReady
         toggle.text = "ÇEVİRİYİ BAŞLAT"
+        status.text = when {
+            !modelReady -> "Türkçe çeviri modeli hazırlanıyor..."
+            !speechReady -> "Android konuşma tanıma servisi bulunamadı."
+            !ttsReady -> "Metin çevirisi hazır; Türkçe seslendirme kullanılamayabilir."
+            else -> "Hazır • İngilizce dinleme / Türkçe çeviri"
+        }
     }
 
-    private fun startTranslation() {
+    private fun startSession() {
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 101)
             return
         }
         running = true
-        translationPending = 0
-        transcript.clear()
+        generation++
+        retries = 0
+        partialText = ""
+        lastSubmitted = ""
+        lastTranslated = ""
+        translations.clear()
         voiceQueue.clear()
-        lastText = ""
-        epoch++
+        transcript.clear()
         toggle.text = "DURDUR"
-        schedule(0)
+        turkish.text = "Dinleniyor..."
+        restart(0)
     }
 
-    private fun schedule(delay: Long) {
-        pending?.let(handler::removeCallbacks)
-        val token = epoch
-        pending = Runnable { if (running && token == epoch && !listening) listen() }
-        handler.postDelayed(pending!!, delay)
+    private fun restart(delay: Long) {
+        pendingRestart?.let { handler.removeCallbacks(it) }
+        val token = generation
+        val action = Runnable {
+            if (running && token == generation && !listening) listen(token)
+        }
+        pendingRestart = action
+        handler.postDelayed(action, delay)
     }
 
-    private fun listen() {
-        if (!running || listening) return
-        speech?.destroy()
-        speech = SpeechRecognizer.createSpeechRecognizer(this)
-        speech?.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) { status.text = "Dinleniyor..." }
-            override fun onBeginningOfSpeech() { status.text = "Konuşma algılandı..." }
-            override fun onRmsChanged(rmsdB: Float) { if (kotlin.math.abs(rmsdB - lastRms) > 1.5f) { lastRms = rmsdB; signal.text = "Mikrofon sinyali: " + if (rmsdB > 6) "YÜKSEK" else if (rmsdB > 0) "ORTA" else "DÜŞÜK" } }
-            override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() { status.text = "Konuşma işleniyor..." }
-            override fun onPartialResults(partialResults: Bundle?) {
-                partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()?.let { original.text = it }
+    private fun listen(token: Int) {
+        if (!running || listening || token != generation) return
+        recognizer?.destroy()
+        recognizer = SpeechRecognizer.createSpeechRecognizer(this)
+        recognizer?.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {
+                retries = 0
+                status.text = "Dinleniyor • İngilizce toplantı"
             }
+            override fun onBeginningOfSpeech() { status.text = "Konuşma algılandı" }
+            override fun onRmsChanged(rmsdB: Float) {
+                signal.text = "Mikrofon: " + when {
+                    rmsdB >= 7f -> "Güçlü sinyal"
+                    rmsdB >= 1f -> "Orta sinyal"
+                    else -> "Zayıf sinyal"
+                }
+            }
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() { status.text = "Konuşma tamamlanıyor..." }
             override fun onEvent(eventType: Int, params: Bundle?) {}
-            override fun onError(error: Int) {
-                listening = false
-                if (running) {
-                    status.text = "Dinleme yeniden başlatılıyor ($error)"
-                    schedule(if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 1400 else 350)
+            override fun onPartialResults(results: Bundle?) {
+                if (token != generation || !running) return
+                val value = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()?.trim().orEmpty()
+                if (value.isNotEmpty()) {
+                    english.text = value
+                    partialText = value
+                    partialFallback?.let { handler.removeCallbacks(it) }
+                    val captured = value
+                    val fallback = Runnable {
+                        if (running && token == generation && partialText == captured && captured.length >= 16) {
+                            submit(captured, token)
+                        }
+                    }
+                    partialFallback = fallback
+                    handler.postDelayed(fallback, 1300)
                 }
             }
             override fun onResults(results: Bundle?) {
                 listening = false
-                val words = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-                if (words.isNullOrBlank()) { schedule(400); return }
-                val now = System.currentTimeMillis()
-                if (words.equals(lastText, true) && now - lastAt < 10000) { schedule(200); return }
-                lastText = words
-                lastAt = now
-                original.text = words
-                transcript.add("EN: " + words)
-                renderHistory()
-                translationPending++
-                status.text = "Dinleme sürüyor • çeviri bekleyen: $translationPending"
-                schedule(120)
-                val token = epoch
-                translator.translate(words).addOnSuccessListener { value ->
-                    if (running && token == epoch) {
-                        translated.text = value
-                        status.text = "Dinleme sürüyor • çeviri bekleyen: $translationPending"
-                        transcript.add("TR: " + value)
-                        renderHistory()
-                        if (voiceEnabled.isChecked) { if (voiceQueue.size >= 12) voiceQueue.removeFirst()
-                            voiceQueue.addLast(value); playNext() }
-                    }
-                    translationPending = (translationPending - 1).coerceAtLeast(0)
-                }.addOnFailureListener {
-                    if (running && token == epoch) status.text = "Çeviri hatası: ${it.localizedMessage}"
-                    translationPending = (translationPending - 1).coerceAtLeast(0)
-                }
+                partialFallback?.let { handler.removeCallbacks(it) }
+                val finalText = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()?.trim().orEmpty().ifEmpty { partialText }
+                if (finalText.isNotBlank()) submit(finalText, token)
+                partialText = ""
+                restart(120)
+            }
+            override fun onError(error: Int) {
+                listening = false
+                partialFallback?.let { handler.removeCallbacks(it) }
+                if (!running || token != generation) return
+                if (partialText.isNotBlank()) submit(partialText, token)
+                partialText = ""
+                retries = (retries + 1).coerceAtMost(6)
+                status.text = "Dinleme yeniden bağlanıyor (kod $error)"
+                val delay = if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ||
+                    error == SpeechRecognizer.ERROR_TOO_MANY_REQUESTS) 1800L else
+                    (250L * retries).coerceAtMost(1500L)
+                restart(delay)
             }
         })
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -219,35 +270,90 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         try {
             listening = true
-            speech?.startListening(intent)
+            recognizer?.startListening(intent)
         } catch (e: Exception) {
             listening = false
-            status.text = "Mikrofon hatası: ${e.localizedMessage}"
-            schedule(1200)
+            status.text = "Mikrofon başlatılamadı: ${e.localizedMessage}"
+            restart(1000)
         }
     }
 
-    private fun renderHistory() { history.text = transcript.takeLast(40).joinToString("\n") }
+    private fun submit(text: String, token: Int) {
+        if (!running || token != generation || !modelReady) return
+        val clean = text.trim()
+        if (clean.length < 3) return
+        val now = System.currentTimeMillis()
+        if (clean.equals(lastSubmitted, ignoreCase = true) && now - lastSubmittedAt < 9000L) return
+        lastSubmitted = clean
+        lastSubmittedAt = now
+        english.text = clean
+        transcript.add("EN: $clean")
+        if (translations.size >= 8) translations.removeFirst()
+        translations.addLast(clean)
+        translateNext(token)
+    }
 
-    private fun playNext() { if (voiceBusy || voiceQueue.isEmpty() || !running) return; voiceBusy = true; tts?.speak(voiceQueue.removeFirst(), TextToSpeech.QUEUE_FLUSH, null, "pst-" + System.nanoTime()) }
+    private fun translateNext(token: Int) {
+        if (translating || translations.isEmpty() || !running || token != generation) return
+        translating = true
+        val input = translations.removeFirst()
+        status.text = "Türkçeye çevriliyor..."
+        translator.translate(input)
+            .addOnSuccessListener { output ->
+                if (running && token == generation) {
+                    lastTranslated = output
+                    turkish.text = output
+                    transcript.add("TR: $output")
+                    if (history.visibility == View.VISIBLE) {
+                        history.text = transcript.takeLast(40).joinToString("\n")
+                    }
+                    status.text = "Türkçe çeviri hazır • dinleme sürüyor"
+                    if (voiceEnabled.isChecked && ttsReady) {
+                        if (voiceQueue.size >= 5) voiceQueue.removeFirst()
+                        voiceQueue.addLast(output)
+                        speakNext()
+                    }
+                }
+                translating = false
+                translateNext(token)
+            }
+            .addOnFailureListener { error ->
+                if (running && token == generation) {
+                    status.text = "Çeviri hatası: ${error.localizedMessage}"
+                    turkish.text = "Çeviri başarısız. Algılanan İngilizce: $input"
+                }
+                translating = false
+                translateNext(token)
+            }
+    }
 
-    private fun stopTranslation() {
+    private fun speakNext() {
+        if (!running || speaking || !ttsReady || !voiceEnabled.isChecked || voiceQueue.isEmpty()) return
+        speaking = true
+        val value = voiceQueue.removeFirst()
+        val result = tts?.speak(value, TextToSpeech.QUEUE_FLUSH, null, "pst-" + System.nanoTime())
+        if (result != TextToSpeech.SUCCESS) speaking = false
+    }
+
+    private fun stopSession() {
         running = false
-        epoch++
-        busy = false
+        generation++
         listening = false
-        pending?.let(handler::removeCallbacks)
-        speech?.cancel()
-        speech?.destroy()
-        speech = null
+        pendingRestart?.let { handler.removeCallbacks(it) }
+        partialFallback?.let { handler.removeCallbacks(it) }
+        recognizer?.cancel()
+        recognizer?.destroy()
+        recognizer = null
         tts?.stop()
-        voiceBusy = false
+        speaking = false
+        translations.clear()
         voiceQueue.clear()
-        refresh()
+        translating = false
+        updateReady()
     }
 
     override fun onDestroy() {
-        stopTranslation()
+        stopSession()
         translator.close()
         tts?.shutdown()
         super.onDestroy()
