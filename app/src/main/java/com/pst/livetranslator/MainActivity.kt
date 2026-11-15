@@ -17,6 +17,8 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.CheckBox
 import java.util.ArrayDeque
+import android.view.WindowManager
+import android.graphics.Typeface
 import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.Translator
@@ -47,9 +49,15 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var lastText = ""
     private var lastAt = 0L
     private var voiceBusy = false
+    private var translationPending = 0
+    private var lastRms = -100f
+    private lateinit var signal: TextView
+    private lateinit var historyToggle: Button
+    private var showHistory = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(28, 35, 28, 28)
@@ -59,9 +67,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             textSize = size
             setPadding(0, 14, 0, 14)
         }
-        layout.addView(label("PST LIVE TRANSLATOR", 24f))
+        layout.addView(label("PST LIVE • TOPLANTI MODU", 22f))
+        layout.addView(label("Altı konuşmacı • Telefon mikrofonu • EN → TR", 14f))
         status = label("Hazırlanıyor...", 15f)
         layout.addView(status)
+        signal = label("Mikrofon seviyesi: bekleniyor", 13f)
+        layout.addView(signal)
         toggle = Button(this).apply {
             text = "HAZIRLANIYOR"
             isEnabled = false
@@ -70,15 +81,23 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         layout.addView(toggle)
         voiceEnabled = CheckBox(this).apply { text = "Türkçe seslendirme"; isChecked = true }
         layout.addView(voiceEnabled)
-        layout.addView(Button(this).apply { text = "TOPLANTI DÖKÜMÜNÜ PAYLAŞ"; setOnClickListener { val send = Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, transcript.joinToString("\\n")) }; startActivity(Intent.createChooser(send, "Dökümü paylaş")) } })
+        
         layout.addView(label("İngilizce konuşma", 18f))
-        original = label("Henüz konuşma yok", 17f)
+        original = label("Henüz konuşma yok", 15f)
         layout.addView(original)
         layout.addView(label("Türkçe çeviri", 18f))
-        translated = label("Çeviri burada görünecek", 19f)
+        translated = label("Çeviri burada görünecek", 38f)
+        translated.setTypeface(null, Typeface.BOLD)
+        translated.setLineSpacing(10f, 1.12f)
+        translated.setPadding(8, 24, 8, 36)
+        translated.setTextIsSelectable(true)
         layout.addView(translated)
-        history = label("TOPLANTI DÖKÜMÜ", 15f)
+        historyToggle = Button(this).apply { text = "DÖKÜMÜ GÖSTER (İKİNCİL)"; setOnClickListener { showHistory = !showHistory; history.visibility = if (showHistory) android.view.View.VISIBLE else android.view.View.GONE; text = if (showHistory) "DÖKÜMÜ GİZLE" else "DÖKÜMÜ GÖSTER (İKİNCİL)" } }
+        layout.addView(historyToggle)
+        history = label("", 13f)
+        history.visibility = android.view.View.GONE
         layout.addView(history)
+        layout.addView(Button(this).apply { text = "DÖKÜMÜ PAYLAŞ"; setOnClickListener { val send = Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, transcript.joinToString("\\n")) }; startActivity(Intent.createChooser(send, "Dökümü paylaş")) } })
         layout.addView(label("Telefon mikrofonu İngilizce konuşmaları dinler. Türkçe seslendirme bağlı Bluetooth medya çıkışına yönlendirilir. İlk çeviri modeli indirme işlemi internet gerektirir.", 13f))
         setContentView(ScrollView(this).apply { addView(layout) })
         translator = Translation.getClient(TranslatorOptions.Builder()
@@ -121,6 +140,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             return
         }
         running = true
+        translationPending = 0
         transcript.clear()
         voiceQueue.clear()
         lastText = ""
@@ -132,18 +152,18 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private fun schedule(delay: Long) {
         pending?.let(handler::removeCallbacks)
         val token = epoch
-        pending = Runnable { if (running && token == epoch && !busy && !listening) listen() }
+        pending = Runnable { if (running && token == epoch && !listening) listen() }
         handler.postDelayed(pending!!, delay)
     }
 
     private fun listen() {
-        if (!running || listening || busy) return
+        if (!running || listening) return
         speech?.destroy()
         speech = SpeechRecognizer.createSpeechRecognizer(this)
         speech?.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) { status.text = "Dinleniyor..." }
             override fun onBeginningOfSpeech() { status.text = "Konuşma algılandı..." }
-            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onRmsChanged(rmsdB: Float) { if (kotlin.math.abs(rmsdB - lastRms) > 1.5f) { lastRms = rmsdB; signal.text = "Mikrofon sinyali: " + if (rmsdB > 6) "YÜKSEK" else if (rmsdB > 0) "ORTA" else "DÜŞÜK" } }
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onEndOfSpeech() { status.text = "Konuşma işleniyor..." }
             override fun onPartialResults(partialResults: Bundle?) {
@@ -155,7 +175,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 listening = false
                 if (running) {
                     status.text = "Dinleme yeniden başlatılıyor ($error)"
-                    schedule(if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 1400 else 700)
+                    schedule(if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 1400 else 350)
                 }
             }
             override fun onResults(results: Bundle?) {
@@ -169,23 +189,23 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 original.text = words
                 transcript.add("EN: " + words)
                 renderHistory()
-                busy = true
-                status.text = "Çevriliyor..."
+                translationPending++
+                status.text = "Dinleme sürüyor • çeviri bekleyen: $translationPending"
+                schedule(120)
                 val token = epoch
                 translator.translate(words).addOnSuccessListener { value ->
                     if (running && token == epoch) {
                         translated.text = value
-                        status.text = "Türkçe seslendiriliyor..."
+                        status.text = "Dinleme sürüyor • çeviri bekleyen: $translationPending"
                         transcript.add("TR: " + value)
                         renderHistory()
-                        if (voiceEnabled.isChecked) { voiceQueue.addLast(value); playNext() }
+                        if (voiceEnabled.isChecked) { if (voiceQueue.size >= 12) voiceQueue.removeFirst()
+                            voiceQueue.addLast(value); playNext() }
                     }
-                    busy = false
-                    schedule(150)
+                    translationPending = (translationPending - 1).coerceAtLeast(0)
                 }.addOnFailureListener {
                     if (running && token == epoch) status.text = "Çeviri hatası: ${it.localizedMessage}"
-                    busy = false
-                    schedule(1100)
+                    translationPending = (translationPending - 1).coerceAtLeast(0)
                 }
             }
         })
@@ -194,6 +214,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 650L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 450L)
         }
         try {
             listening = true
