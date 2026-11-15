@@ -7,7 +7,9 @@ services:
     startCommand: uvicorn server.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
-      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+      - key: AZURE_TRANSLATOR_KEY
+        sync: false
+      - key: AZURE_TRANSLATOR_REGION
         sync: false
       - key: PST_GATEWAY_TOKEN
         sync: false
