@@ -43,6 +43,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var offlineModeButton: Button
     private var offlineMode = false
     private var partialJob: Runnable? = null
+    private var previewSerial = 0
+    private var finalSerial = 0
+    private var previewBusy = false
     private var tts: TextToSpeech? = null
     private var modelReady = false
     private var ttsReady = false
@@ -155,7 +158,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     val token = generation
                     if (candidate.length >= 24) {
                         val job = Runnable {
-                            if (running && token == generation && partialText == candidate) submit(candidate, token)
+                            if (running && token == generation && partialText == candidate) preview(candidate, token)
                         }
                         partialJob = job
                         handler.postDelayed(job, 900)
@@ -236,6 +239,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         partialText = ""
         lastSubmitted = ""
         lastTranslated = ""
+        previewSerial++
+        finalSerial++
         translations.clear()
         voiceQueue.clear()
         transcript.clear()
@@ -285,7 +290,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     val captured = value
                     val fallback = Runnable {
                         if (running && token == generation && partialText == captured && captured.length >= 16) {
-                            submit(captured, token)
+                            preview(captured, token)
                         }
                     }
                     partialFallback = fallback
@@ -333,25 +338,34 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
     }
 
+    private fun preview(text: String, token: Int) {
+        if (!running || token != generation || !modelReady || previewBusy) return
+        previewBusy = true
+        val serial = ++previewSerial
+        val finalSnapshot = finalSerial
+        translator.translate(text).addOnSuccessListener { result ->
+            previewBusy = false
+            if (running && token == generation && serial == previewSerial &&
+                finalSnapshot == finalSerial && partialText == text) {
+                turkish.text = result
+                status.text = "Canlı önizleme • cümle tamamlanıyor"
+            }
+        }.addOnFailureListener { previewBusy = false }
+    }
+
     private fun submit(text: String, token: Int) {
         if (!running || token != generation || !modelReady) return
         val clean = text.trim()
         if (clean.length < 3) return
         val now = System.currentTimeMillis()
         if (clean.equals(lastSubmitted, ignoreCase = true) && now - lastSubmittedAt < 9000L) return
-        if (lastSubmitted.isNotEmpty() && clean.startsWith(lastSubmitted, ignoreCase = true) && now - lastSubmittedAt < 6000L) {
-            val remainder = clean.substring(lastSubmitted.length).trim()
-            if (remainder.length < 5) return
-            lastSubmitted = clean
-            translations.addLast(remainder)
-            translateNext(token)
-            return
-        }
         lastSubmitted = clean
         lastSubmittedAt = now
+        finalSerial++
+        previewSerial++
         english.text = clean
         transcript.add("EN: $clean")
-        if (translations.size >= 8) translations.removeFirst()
+        // Preserve finalized speech; do not silently discard meeting content.
         translations.addLast(clean)
         translateNext(token)
     }
@@ -360,7 +374,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         if (translating || translations.isEmpty() || !running || token != generation) return
         translating = true
         val input = translations.removeFirst()
-        status.text = "Türkçeye çevriliyor..."
+        status.text = "Çeviri işleniyor • kuyruk: " + translations.size
         translator.translate(input)
             .addOnSuccessListener { output ->
                 if (running && token == generation) {
@@ -405,6 +419,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         pendingRestart?.let { handler.removeCallbacks(it) }
         partialFallback?.let { handler.removeCallbacks(it) }
         offline.stop()
+        previewSerial++
         partialJob?.let { handler.removeCallbacks(it) }
         recognizer?.cancel()
         recognizer?.destroy()
