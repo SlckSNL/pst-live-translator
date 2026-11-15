@@ -9,6 +9,10 @@ client = AsyncOpenAI()
 ACCESS_TOKEN = os.getenv("PST_GATEWAY_TOKEN", "")
 MODEL = os.getenv("PST_TRANSLATION_MODEL", "gpt-4.1-mini")
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 class TranslationRequest(BaseModel):
     text: str = Field(min_length=1, max_length=5000)
     previous_english: list[str] = Field(default_factory=list, max_length=8)
