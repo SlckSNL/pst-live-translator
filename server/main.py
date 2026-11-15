@@ -1,46 +1,41 @@
-"""PST V3.4 contextual translation gateway. pip install fastapi uvicorn openai"""
+"""PST Google Cloud Translation gateway; credentials stay server-side."""
+import json
 import os
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
-from openai import AsyncOpenAI
+from google.cloud import translate_v2 as translate
+from google.oauth2 import service_account
 
 app = FastAPI()
-client = AsyncOpenAI()
 ACCESS_TOKEN = os.getenv("PST_GATEWAY_TOKEN", "")
-MODEL = os.getenv("PST_TRANSLATION_MODEL", "gpt-4.1-mini")
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+def google_client():
+    raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    if raw:
+        credentials = service_account.Credentials.from_service_account_info(json.loads(raw))
+        return translate.Client(credentials=credentials, project=credentials.project_id)
+    return translate.Client()
 
 class TranslationRequest(BaseModel):
     text: str = Field(min_length=1, max_length=5000)
     previous_english: list[str] = Field(default_factory=list, max_length=8)
     previous_turkish: list[str] = Field(default_factory=list, max_length=8)
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 @app.post("/translate")
-async def translate(req: TranslationRequest, authorization: str | None = Header(default=None)):
+def translate_text(req: TranslationRequest, authorization: str | None = Header(default=None)):
     if not ACCESS_TOKEN or authorization != f"Bearer {ACCESS_TOKEN}":
         raise HTTPException(status_code=401, detail="Unauthorized")
-    history = "\n".join(
-        f"EN: {en}\nTR: {tr}" for en, tr in zip(
-            req.previous_english[-8:], req.previous_turkish[-8:]
+    try:
+        response = google_client().translate(
+            req.text, source_language="en", target_language="tr", format_="text"
         )
-    )
-    response = await client.responses.create(
-        model=MODEL,
-        instructions=(
-            "You are a professional live interpreter for an English-to-Turkish "
-            "industrial manufacturing business meeting. Translate ONLY the new "
-            "English utterance to natural, accurate Turkish. Use the previous "
-            "conversation for context, never retranslate previous utterances. "
-            "Preserve numbers, units, dates, names, negation, uncertainty and "
-            "commercial commitments. Do not invent facts. Return translation only."
-        ),
-        input=f"Previous context (reference only):\n{history}\n\nNEW ENGLISH:\n{req.text}",
-        max_output_tokens=800,
-    )
-    result = response.output_text.strip()
-    if not result:
-        raise HTTPException(status_code=502, detail="Empty translation")
-    return {"translation": result}
+        result = response.get("translatedText", "").strip()
+        if not result:
+            raise ValueError("Empty translation")
+        return {"translation": result}
+    except Exception:
+        raise HTTPException(status_code=502, detail="Google Cloud Translation unavailable")
