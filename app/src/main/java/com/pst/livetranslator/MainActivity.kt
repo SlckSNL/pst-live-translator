@@ -128,7 +128,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         root.addView(voiceEnabled)
         cloudSwitch = CheckBox(this).apply {
-            text = "V3.4 • Yapay zekâ ile bağlamlı çeviri"
+            text = "GOOGLE CLOUD TRANSLATION (internet)"
             isChecked = false
         }
         root.addView(cloudSwitch)
@@ -139,7 +139,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         root.addView(endpointField)
         tokenField = EditText(this).apply {
-            hint = "Sunucu erişim belirteci (API anahtarı değil)"
+            hint = "Sunucu erişim belirteci (Google anahtarı değil)"
             setSingleLine(true)
         }
         root.addView(tokenField)
@@ -471,7 +471,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         contextEngine.translate(endpoint, tokenField.text.toString(), input,
             priorEnglish, priorTurkish) { output ->
-            if (output != null) done(output, "Yapay zekâ")
+            if (output != null) done(output, "Google Cloud")
             else translator.translate(input)
                 .addOnSuccessListener { done(it, "Yerel yedek") }
                 .addOnFailureListener { done(null, "Yerel yedek") }
