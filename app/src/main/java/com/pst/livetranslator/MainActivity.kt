@@ -17,6 +17,7 @@ import android.view.WindowManager
 import android.graphics.Typeface
 import android.widget.Button
 import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -37,6 +38,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var streamScroll: ScrollView
     private val translatedBlocks = mutableListOf<String>()
     private var flushTask: Runnable? = null
+    private lateinit var cloudSwitch: CheckBox
+    private lateinit var endpointField: EditText
+    private lateinit var tokenField: EditText
+    private val contextEngine = ContextTranslator()
+    private val englishContext = ArrayDeque<String>()
+    private val turkishContext = ArrayDeque<String>()
     private lateinit var signal: TextView
     private lateinit var toggle: Button
     private lateinit var history: TextView
@@ -120,6 +127,29 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             isChecked = false
         }
         root.addView(voiceEnabled)
+        cloudSwitch = CheckBox(this).apply {
+            text = "V3.4 • Yapay zekâ ile bağlamlı çeviri"
+            isChecked = false
+        }
+        root.addView(cloudSwitch)
+        endpointField = EditText(this).apply {
+            hint = "HTTPS çeviri sunucusu URL"
+            setSingleLine(true)
+            setText(getPreferences(0).getString("gateway", ""))
+        }
+        root.addView(endpointField)
+        tokenField = EditText(this).apply {
+            hint = "Sunucu erişim belirteci (API anahtarı değil)"
+            setSingleLine(true)
+        }
+        root.addView(tokenField)
+        root.addView(Button(this).apply {
+            text = "SUNUCU ADRESİNİ KAYDET"
+            setOnClickListener {
+                getPreferences(0).edit().putString("gateway", endpointField.text.toString().trim()).apply()
+                status.text = "Sunucu adresi kaydedildi"
+            }
+        })
         root.addView(label("TÜRKÇE CANLI ÇEVİRİ", 18f))
         turkish = label("Konuşma bekleniyor...", 32f).apply {
             setTypeface(null, Typeface.BOLD)
@@ -253,6 +283,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         finalSerial++
         translations.clear()
         translatedBlocks.clear()
+        englishContext.clear()
+        turkishContext.clear()
         flushTask?.let { handler.removeCallbacks(it) }
         voiceQueue.clear()
         transcript.clear()
@@ -392,12 +424,18 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         val pieces = mutableListOf<String>()
         while (translations.isNotEmpty() && pieces.size < 3) pieces.add(translations.removeFirst())
         val input = pieces.joinToString(". ")
+        val priorEnglish = englishContext.toList().takeLast(8)
+        val priorTurkish = turkishContext.toList().takeLast(8)
+        pieces.forEach { englishContext.addLast(it) }
+        while (englishContext.size > 12) englishContext.removeFirst()
         status.text = "Çeviri işleniyor • kuyruk: " + translations.size
-        translator.translate(input)
-            .addOnSuccessListener { output ->
+        translateFinal(input, priorEnglish, priorTurkish) { output, source ->
+                if (output != null) {
                 if (running && token == generation) {
                     lastTranslated = output
                     translatedBlocks.add(output)
+                    turkishContext.addLast(output)
+                    while (turkishContext.size > 12) turkishContext.removeFirst()
                     turkish.text = translatedBlocks.takeLast(30).joinToString("\n\n")
                     streamScroll.post { streamScroll.fullScroll(View.FOCUS_DOWN) }
                     previewLabel.text = "Dinleniyor..."
@@ -405,24 +443,39 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     if (history.visibility == View.VISIBLE) {
                         history.text = transcript.takeLast(40).joinToString("\n")
                     }
-                    status.text = "Türkçe çeviri hazır • dinleme sürüyor"
+                    status.text = "$source çeviri hazır • dinleme sürüyor"
                     if (voiceEnabled.isChecked && ttsReady) {
                         if (voiceQueue.size >= 5) voiceQueue.removeFirst()
                         voiceQueue.addLast(output)
                         speakNext()
                     }
                 }
-                translating = false
-                translateNext(token)
-            }
-            .addOnFailureListener { error ->
-                if (running && token == generation) {
-                    status.text = "Çeviri hatası: ${error.localizedMessage}"
-                    previewLabel.text = "Çeviri hatası; İngilizce: $input"
+                } else if (running && token == generation) {
+                    previewLabel.text = "Çeviri başarısız: $input"
                 }
-                translating = false
-                translateNext(token)
+                if (token == generation) {
+                    translating = false
+                    translateNext(token)
+                }
             }
+    }
+
+    private fun translateFinal(input: String, priorEnglish: List<String>,
+                               priorTurkish: List<String>, done: (String?, String) -> Unit) {
+        val endpoint = endpointField.text.toString().trim()
+        if (!cloudSwitch.isChecked || !endpoint.startsWith("https://")) {
+            translator.translate(input)
+                .addOnSuccessListener { done(it, "Yerel") }
+                .addOnFailureListener { done(null, "Yerel") }
+            return
+        }
+        contextEngine.translate(endpoint, tokenField.text.toString(), input,
+            priorEnglish, priorTurkish) { output ->
+            if (output != null) done(output, "Yapay zekâ")
+            else translator.translate(input)
+                .addOnSuccessListener { done(it, "Yerel yedek") }
+                .addOnFailureListener { done(null, "Yerel yedek") }
+        }
     }
 
     private fun speakNext() {
