@@ -1,23 +1,22 @@
-# PST Live Translator V3.4
+# PST Live Translator — Google Cloud Translation
 
-Android live English-to-Turkish meeting translator. Two modes:
-- Offline ML Kit (default, no gateway).
-- Optional contextual AI translation through a **user-deployed HTTPS backend**. English recognition remains on-device/Android.
+English speech recognition (Android or Vosk) and Turkish live translation.
 
-## Server setup
-Install Python 3.11+, then `pip install -r server/requirements.txt`.
-Set environment variables `OPENAI_API_KEY` and `PST_GATEWAY_TOKEN` to different long secret values.
-Optionally set `PST_TRANSLATION_MODEL` (default `gpt-4.1-mini`).
-Start `uvicorn server.main:app --host 127.0.0.1 --port 8000`.
-Deploy behind HTTPS with authentication and rate limiting. A localhost server is **not reachable from the Android phone** unless network access/tunneling is configured.
+## Translation modes
+- **Google ML Kit**: on-device, free, default and automatic fallback.
+- **Google Cloud Translation Basic v2 (NMT)**: optional cloud translation via a user-deployed HTTPS gateway. This is **not Gemini or a context-aware LLM**. The server translates the current English text; previous segments are currently ignored by Google Cloud Basic.
 
-In the app enable AI translation, enter the public HTTPS URL ending in `/translate`, and the **gateway token** (not the OpenAI API key). The gateway token is kept in memory, not saved by the app. If the cloud request fails or times out, ML Kit is used automatically.
+## Setup
+1. In [Google Cloud Console](https://console.cloud.google.com/), create/select a project, attach billing, enable **Cloud Translation API**.
+2. Create a dedicated service account with only the required Cloud Translation permissions. Generate a JSON credential if necessary; treat it as a secret. Prefer managed identity/secret management when available.
+3. Deploy the repository's `render.yaml` Blueprint on Render. Configure secret `GOOGLE_SERVICE_ACCOUNT_JSON` with the entire service-account JSON and `PST_GATEWAY_TOKEN` with a long random independent token. **Never commit either secret.**
+4. Copy the deployed HTTPS base URL and append `/translate`. In the Android app enable **GOOGLE CLOUD TRANSLATION**, enter the HTTPS URL and the gateway token.
+5. Test a short English sentence. The status should say **Google Cloud çeviri hazır**. If it says **Yerel yedek**, the cloud request failed and ML Kit was used.
 
-## Privacy / costs
-The English utterance and up to eight prior English/Turkish segments are sent to the configured server and then to the AI provider. Obtain appropriate meeting consent and assess confidentiality before enabling. Provider usage incurs charges. Do not expose OpenAI API keys in Android apps or commit secrets to GitHub.
+Google Cloud API charges may apply; set billing budgets and quotas. A Render free instance can sleep and cause latency. Meeting speech and translated text are sent to the gateway and Google Cloud when enabled; assess consent and confidentiality.
 
 ## Build
-GitHub Actions > Build Android APK > artifact `PST-Live-Translator-debug-APK`.
+GitHub Actions > Build Android APK > `PST-Live-Translator-debug-APK`.
 
 ## Limitations
-Not yet verified on a physical device. Cloud translation requires a deployed gateway; the APK alone does not activate AI translation. Single-phone microphone cannot reliably separate simultaneous speakers.
+Physical-device and translation-quality tests pending. Single microphone cannot separate overlapping voices. Cloud Translation Basic does not provide conversational context handling. The Android app requires a deployed gateway for Google Cloud mode.
