@@ -33,6 +33,10 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var status: TextView
     private lateinit var english: TextView
     private lateinit var turkish: TextView
+    private lateinit var previewLabel: TextView
+    private lateinit var streamScroll: ScrollView
+    private val translatedBlocks = mutableListOf<String>()
+    private var flushTask: Runnable? = null
     private lateinit var signal: TextView
     private lateinit var toggle: Button
     private lateinit var history: TextView
@@ -117,13 +121,19 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         root.addView(voiceEnabled)
         root.addView(label("TÜRKÇE CANLI ÇEVİRİ", 18f))
-        turkish = label("Konuşma bekleniyor...", 38f).apply {
+        turkish = label("Konuşma bekleniyor...", 32f).apply {
             setTypeface(null, Typeface.BOLD)
             setLineSpacing(10f, 1.15f)
             setTextIsSelectable(true)
-            minHeight = 250
+            minHeight = 180
         }
-        root.addView(turkish)
+        streamScroll = ScrollView(this).apply {
+            addView(turkish)
+            layoutParams = LinearLayout.LayoutParams(-1, 0, 1f)
+        }
+        root.addView(streamScroll)
+        previewLabel = label("Canlı önizleme bekleniyor...", 19f)
+        root.addView(previewLabel)
         root.addView(label("Algılanan İngilizce", 14f))
         english = label("—", 15f)
         root.addView(english)
@@ -146,7 +156,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             }
         })
         root.addView(label("Tek telefon mikrofonu, üst üste konuşan kişileri ayrı ses kanallarına ayıramaz. Konuşmacıların sırayla konuşması doğruluğu artırır.", 12f))
-        setContentView(ScrollView(this).apply { addView(root) })
+        setContentView(root)
         offline = OfflineStreaming(this, object : OfflineStreaming.Listener {
             override fun onStatus(value: String) { if (running && offlineMode) status.text = value }
             override fun onPartial(value: String) {
@@ -242,10 +252,13 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         previewSerial++
         finalSerial++
         translations.clear()
+        translatedBlocks.clear()
+        flushTask?.let { handler.removeCallbacks(it) }
         voiceQueue.clear()
         transcript.clear()
         toggle.text = "DURDUR"
         turkish.text = "Dinleniyor..."
+        previewLabel.text = "Canlı önizleme bekleniyor..."
         if (offlineMode) offline.start() else restart(0)
     }
 
@@ -347,7 +360,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             previewBusy = false
             if (running && token == generation && serial == previewSerial &&
                 finalSnapshot == finalSerial && partialText == text) {
-                turkish.text = result
+                previewLabel.text = result
                 status.text = "Canlı önizleme • cümle tamamlanıyor"
             }
         }.addOnFailureListener { previewBusy = false }
@@ -367,19 +380,27 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         transcript.add("EN: $clean")
         // Preserve finalized speech; do not silently discard meeting content.
         translations.addLast(clean)
-        translateNext(token)
+        flushTask?.let { handler.removeCallbacks(it) }
+        val task = Runnable { translateNext(token) }
+        flushTask = task
+        if (translations.size >= 3) translateNext(token) else handler.postDelayed(task, 650)
     }
 
     private fun translateNext(token: Int) {
         if (translating || translations.isEmpty() || !running || token != generation) return
         translating = true
-        val input = translations.removeFirst()
+        val pieces = mutableListOf<String>()
+        while (translations.isNotEmpty() && pieces.size < 3) pieces.add(translations.removeFirst())
+        val input = pieces.joinToString(". ")
         status.text = "Çeviri işleniyor • kuyruk: " + translations.size
         translator.translate(input)
             .addOnSuccessListener { output ->
                 if (running && token == generation) {
                     lastTranslated = output
-                    turkish.text = output
+                    translatedBlocks.add(output)
+                    turkish.text = translatedBlocks.takeLast(30).joinToString("\n\n")
+                    streamScroll.post { streamScroll.fullScroll(View.FOCUS_DOWN) }
+                    previewLabel.text = "Dinleniyor..."
                     transcript.add("TR: $output")
                     if (history.visibility == View.VISIBLE) {
                         history.text = transcript.takeLast(40).joinToString("\n")
@@ -397,7 +418,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             .addOnFailureListener { error ->
                 if (running && token == generation) {
                     status.text = "Çeviri hatası: ${error.localizedMessage}"
-                    turkish.text = "Çeviri başarısız. Algılanan İngilizce: $input"
+                    previewLabel.text = "Çeviri hatası; İngilizce: $input"
                 }
                 translating = false
                 translateNext(token)
@@ -418,6 +439,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         listening = false
         pendingRestart?.let { handler.removeCallbacks(it) }
         partialFallback?.let { handler.removeCallbacks(it) }
+        flushTask?.let { handler.removeCallbacks(it) }
         offline.stop()
         previewSerial++
         partialJob?.let { handler.removeCallbacks(it) }
